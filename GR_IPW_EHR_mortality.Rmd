@@ -1,0 +1,458 @@
+---
+title: "KS Data"
+author: "Josh"
+output: html_document
+---
+
+
+```{r echo=FALSE}
+
+library(dplyr)
+library(survival)
+library(dtplyr)
+library(ggplot2)
+library(ggfortify)
+library(tidyr)
+library(lubridate)
+library(data.table)
+library(splines)
+library(survey)
+library(mitools)
+library(mvtnorm)
+library(kableExtra)
+
+```
+
+
+
+```{r}
+load("/Users/joshslone/Library/CloudStorage/OneDrive-Vanderbilt/KS_MI_datasets/Base_data/all_cohort_imp1.Rda") 
+load("/Users/joshslone/Library/CloudStorage/OneDrive-Vanderbilt/KS_MI_datasets/Base_data/all_cd4_1.Rda") 
+#all_cd4_1 = all_cd4_1 |> filter(!is.na(month_avg_cd4))
+load("/Users/joshslone/Library/CloudStorage/OneDrive-Vanderbilt/KS_MI_datasets/Base_data/all_val_long4.Rda") 
+patients_all = fread("/Users/joshslone/Library/CloudStorage/OneDrive-Vanderbilt/KS_MI_datasets/Sampling_frame/patients_all.csv")
+names(patients_all)="patient"
+load("/Users/joshslone/Library/CloudStorage/OneDrive-Vanderbilt/KS_MI_datasets/Base_data/all_val_long.Rda") 
+
+
+
+all_val_long4$R=1
+
+d_1 = all_cohort_imp1 |> filter(patient %in% all_val_long$patient)  |> left_join(all_val_long4[,c('patient','R')]) |> count(patient,stop_d,program,death_y,R) |> mutate(n=NULL,R=if_else(is.na(R),0,R))
+
+```
+
+
+```{r}
+#### Single imputation for filling in missing cd4 values in phase 1 and phase 2
+
+#### use one row for all patients in cohort 
+d = all_cohort_imp1 |> inner_join(patients_all,by="patient")  
+  
+## Remove patients w/ dis_d < as.Date("2009-12-01")
+d1 = d |> filter(is.na(dis_d) | !is.na(dis_d) & as.Date(dis_d) >= as.Date("2009-12-01") & program==1 | !is.na(dis_d) & as.Date(dis_d) >= as.Date("2010-01-01") & program==0)  
+
+## Add unvalidated CD4 
+d2 = d1 |> left_join(all_cd4_1[,c("patient","year_month","month_avg_cd4")],by="patient") |> mutate(cd4_d=if_else(!is.na(year_month),paste(year_month, "-01", sep=""),NA)) |>mutate(cd4_d=as.Date(cd4_d), Diff= cd4_d-as.Date(dis_d)) |> mutate(Diff=if_else(Diff>-183,Diff,NA),Diff=abs(Diff))
+
+#d2 = d1 |> left_join(all_cd4_1[,c("patient","year_month","month_avg_cd4")],by="patient") |> mutate(cd4_d=if_else(!is.na(year_month),paste(year_month, "-01", sep=""),NA)) |>mutate(cd4_d=as.Date(cd4_d), Diff= cd4_d-as.Date(dis_d)) |> mutate(Diff=if_else(Diff>-183,Diff,NA),Diff=abs(Diff))
+
+### limit to date of cd4 closest to KS date of diagnosis (6 months before to 12 months after) 
+d3_1= d2|> group_by(patient) |> slice_min(Diff, with_ties = F) |> mutate(cd4_rt=if_else(!is.na(Diff) & !is.na(month_avg_cd4),sqrt(month_avg_cd4),NA))
+
+
+## Add validated CD4 
+
+d4 = d3_1 |> left_join(all_val_long4[,c("patient","month_avg_cd4_final","cd4_d_final")],by="patient") 
+
+
+d4$Diff1=d4$cd4_d_final - d4$canc_d_final 
+#d4$Diff1=ifelse(d4$Diff1 >-183,d4$Diff1,NA)
+d4$Diff1=ifelse(d4$Diff1 >-183,d4$Diff1,NA)
+
+d4$Diff1=abs(d4$Diff1)
+
+d5= d4|> group_by(patient) |> slice_min(Diff1, with_ties = F) |> mutate(cd4_rt_final=if_else(!is.na(Diff1) & !is.na(month_avg_cd4_final),sqrt(month_avg_cd4_final),NA))
+
+d6 = d5 |> filter(V==0 & !is.na(dis_d) | (V==1 & !is.na(dis_d) & !is.na(canc_d_final) & as.Date(canc_d_final)>=as.Date("2009-12-01"))) 
+
+# d6 = d6 |> mutate(cd4_rt=if_else(Diff < 183,cd4_rt,NA),cd4_rt_final=if_else(Diff1 < 183,cd4_rt_final,NA)) |> mutate(age=as.numeric(round((as.Date(dis_d)-as.Date(birth_d))/365.25,1)), year = if_else(as.Date(dis_d)<as.Date("2010-01-01"),
+#  as.numeric("2010"),as.numeric(substr(dis_d,1,4))),art_ind = if_else(is.na(art_sd),0,if_else(as.Date(art_sd)<as.Date(dis_d),1,0)),age_final=as.numeric(round((as.Date(canc_d_final)-as.Date(birth_d_final))/365.25,1)), year_final = if_else(as.Date(canc_d_final)<as.Date("2010-01-01"),
+#  as.numeric("2010"),as.numeric(substr(canc_d_final,1,4))),art_ind_final = if_else(is.na(recart_d_final),0,if_else(as.Date(recart_d_final)<as.Date(canc_d_final),1,0)))
+
+d6 = d6 |> mutate(cd4_rt=if_else(Diff < 183,cd4_rt,NA),cd4_rt_final=if_else(Diff1 < 183,cd4_rt_final,NA)) |> mutate(age=as.numeric(round((as.Date(dis_d)-as.Date(birth_d))/365.25,1)), year = if_else(as.Date(dis_d)<as.Date("2010-01-01"),
+ as.numeric("2010"),as.numeric(substr(dis_d,1,4))),art_ind = if_else(is.na(art_sd),0,if_else(as.Date(art_sd)<as.Date(dis_d),1,0)),age_final=as.numeric(round((as.Date(canc_d_final)-as.Date(birth_d_final))/365.25,1)), year_final = if_else(as.Date(canc_d_final)<as.Date("2010-01-01"),
+ as.numeric("2010"),as.numeric(substr(canc_d_final,1,4))),art_ind_final = if_else(is.na(recart_d_final),0,if_else(as.Date(recart_d_final)<as.Date(canc_d_final),1,0)))
+
+
+d6 = d6 |>mutate(time=if_else(is.na(death_d),as.numeric(as.Date(stop_d)-as.Date(dis_d))+1,as.numeric(as.Date(death_d)-as.Date(dis_d))+1),canc_yr=if_else(as.Date(dis_d) >= as.Date("2010-01-01"), as.numeric(format(dis_d,'%Y')), as.numeric("2010")), death_ind=if_else(is.na(death_d),0,1)) |>  mutate(time_final=if_else(is.na(death_d_final),as.numeric(as.Date(l_alive_d_final)-as.Date(canc_d_final))+1,as.numeric(as.Date(death_d_final)-as.Date(canc_d_final))+1),canc_yr_final=if_else(as.Date(canc_d_final) >= as.Date("2010-01-01"), as.numeric(format(canc_d_final,'%Y')), as.numeric("2010")), death_ind_final=if_else(is.na(death_d_final),0,1))
+
+
+d6 = d6 |> mutate(remove = if_else(dis_d < enrol_d - 60,1,0),remove_final =  if_else(!is.na(canc_d_final) & canc_d_final < enrol_d_final - 60,1,0)) |> filter(remove == 0 & remove_final==0) 
+
+
+d_2 = d_1 |> filter(patient %in% d6$patient)
+mod_w = glm(R ~ stop_d + program + death_y, family=binomial,data = d_2)
+mod_p<- mod_w$fitted.values
+d_p = data.frame(d_2,p_est=mod_p)
+
+# 
+# sum(is.na(d6[d6$V==1,]$cd4_rt_final))
+# length(d6[d6$V==1,]$cd4_rt_final)
+
+```
+
+
+
+```{r}
+# MI error prone w/o MI eligibility
+m=10
+set.seed(1993)
+betas_ipw_tte1 = vcovs_ipw_tte1 = betas_gr_mi_tte1 = vcovs_gr_mi_tte1 = betas_ehr_tte1 = vcovs_ehr_tte1 = vector("list", m)
+
+for(i in 1:m){
+##### Multiple imputation for cd4_rt in phase 1 AND 2
+  
+### imputation for phase 1 cd4 values based on error prone variables
+    mod5 = lm(cd4_rt ~  male +program+ ns(age,df=4) + year +art_ind + ns(time,df=4)*death_ind, data= d6[!is.na(d6$cd4_rt),]) 
+   ## to easily get design matrix for the full cohort
+    d6_1 = d6 |> mutate(cd4_rt=1)
+    v3=model.matrix(terms(mod5),d6_1)
+    beta2 = mod5$coefficients
+    vcov2 = vcov(mod5)
+    rmvs2=rmvnorm(n=1,beta2,vcov2)
+    rmvs2 = as.vector(rmvs2)
+    cd4_rt_new = as.vector((v3 %*% rmvs2) + sample(resid(mod5),1))
+    d6$cd4_rt_init_imp=if_else(is.na(d6$cd4_rt),cd4_rt_new,d6$cd4_rt)
+    ### any imputed CD4<0 assign a 1
+    d6$cd4_rt_init_imp=if_else(d6$cd4_rt_init_imp<0,1,d6$cd4_rt_init_imp)
+
+  ### imputation for phase 2 cd4 values
+  #d6_val = d6 |> filter(!is.na(canc_d_final))
+  
+  mod6 = lm(cd4_rt_final ~  male_final +program+ ns(age_final,df=4) + ns(cd4_rt_init_imp,df=4) + year_final +art_ind_final + ns(time_final,df=4)*death_ind_final, data= d6)
+    ## to easily get design matrix for phase 2
+  
+  d6_1 = d6 |> mutate(cd4_rt_final=1)
+   v4=model.matrix(terms(mod6),d6_1)
+  beta2 = mod6$coefficients
+  vcov2 = vcov(mod6)
+  rmvs2=rmvnorm(n=1,beta2,vcov2)
+  rmvs2 = as.vector(rmvs2)
+  cd4_rt_final_new = as.vector((v4 %*% rmvs2) + sample(resid(mod6),1))
+  d6_phase2 = d6[d6$V==1,]
+  d6_phase2$cd4_rt_imp_final=if_else(is.na(d6_phase2$cd4_rt_final),cd4_rt_final_new,d6_phase2$cd4_rt_final)
+  d6_phase2$cd4_rt_imp_final=if_else(d6_phase2$cd4_rt_imp_final<0,1,d6_phase2$cd4_rt_imp_final)
+  d7 = rbind(d6[d6$V==0,],d6_phase2)
+
+# d7 = d7 |>mutate(time=if_else(is.na(death_d),as.numeric(as.Date(stop_d)-as.Date(dis_d))+1,as.numeric(as.Date(death_d)-as.Date(dis_d))+1),canc_yr=if_else(as.Date(dis_d) >= as.Date("2010-01-01"), as.numeric(format(dis_d,'%Y')), as.numeric("2010")), death_ind=if_else(is.na(death_d),0,1)) |>  mutate(time_final=if_else(is.na(death_d_final),as.numeric(as.Date(l_alive_d_final)-as.Date(canc_d_final)),as.numeric(as.Date(death_d_final)-as.Date(canc_d_final))),canc_yr_final=if_else(as.Date(canc_d_final) >= as.Date("2010-01-01"), as.numeric(format(canc_d_final,'%Y')), as.numeric("2010")), death_ind_final=if_else(is.na(death_d_final),0,1))
+
+## IPW
+#load(file="~/Desktop/PhD/Research/KS_Data/Code/wgts_by_hand.Rda")
+## nonresponse probabilities
+#load("/Users/joshslone/Library/CloudStorage/OneDrive-Vanderbilt/KS_MI_datasets/Base_data/d_p.Rda") 
+
+load(file="/Users/joshslone/Library/CloudStorage/OneDrive-Vanderbilt/KS_MI_datasets/MI_datasets/strata.Rda")
+
+
+#d_tte_c= merge(x=d7,y=d3,all.x=TRUE,by="patient")
+d_tte_c= merge(x=d7,y=d_c2,all.x=TRUE,by="patient")
+d_tte_c= merge(x=d_tte_c,y=d_p[,c('patient','p_est')],all.x=TRUE,by="patient")
+
+#################################################################################################################
+#### IPW with estimated weights and nonresponse probabilities from the TTE analysis cohort
+
+mod_w = glm(V ~ strata, family=binomial,data = d_tte_c)
+mod_p <- mod_w$fitted.values
+d_tte_cw = data.frame(d_tte_c,p_est_overall=mod_p)
+d_tte_cw = d_tte_cw |> mutate(w_est = 1/(p_est_overall*p_est))
+
+#designMF6 = twophase(id=list(~1,~1),weights=list(~1,~w_est),subset=~V==1, data=d_tte_cw,method="approx")
+
+designMF6 = twophase(id=list(~1,~1),weights=list(~1,~w_est),strata=list(NULL,~strata),subset=~V==1, data=d_tte_cw,method="approx")
+
+
+ipw_tte_c2 = svycoxph(Surv(time_final,death_ind_final) ~ male_final+program+I(age_final/10)+I(canc_yr_final-2010)+art_ind_final + cd4_rt_imp_final,design=designMF6)
+
+#################################################################################################################
+
+## Generalized raking
+
+mod_ehr_tte = coxph(Surv(time,death_ind) ~ male+program+I(age/10)+I(canc_yr-2010)+art_ind + cd4_rt_init_imp, data = d7)
+
+  
+  naiveInfl1 = resid(mod_ehr_tte,type="dfbeta",weighted=FALSE)
+  colnames(naiveInfl1)=paste("INF", 1:ncol(naiveInfl1), sep="")
+  d7_2=cbind(d_tte_cw,naiveInfl1) 
+  infs_eq <- as.formula(paste('~', paste0('INF', 1:ncol(naiveInfl1), collapse = ' + ')))
+  
+  ## GR + MI
+  designMF2 = twophase(id=list(~1,~1),weights=list(~1,~w_est),strata=list(NULL,~strata),data=d7_2,subset=~V==1,method="approx")
+  Ninflcal1<- survey::calibrate(designMF2,formula=infs_eq,phase=2,calfun="raking") 
+  fit_gr_tte2 = svycoxph(Surv(time_final,death_ind_final) ~ male_final+program+I(age_final/10)+I(canc_yr_final-2010)+art_ind_final + cd4_rt_imp_final,design=Ninflcal1)  
+
+betas_ipw_tte1[[i]] = coef(ipw_tte_c2)
+vcovs_ipw_tte1[[i]] = vcov(ipw_tte_c2)
+betas_gr_mi_tte1[[i]] = coef(fit_gr_tte2)
+vcovs_gr_mi_tte1[[i]] = vcov(fit_gr_tte2)
+betas_ehr_tte1[[i]] = coef(mod_ehr_tte)
+vcovs_ehr_tte1[[i]] = vcov(mod_ehr_tte)
+}
+
+wgt_tte_results1=MIcombine(betas_ipw_tte1,vcovs_ipw_tte1)
+rak_tte_results1=MIcombine(betas_gr_mi_tte1,vcovs_gr_mi_tte1)
+ehr_tte_results1=MIcombine(betas_ehr_tte1,vcovs_ehr_tte1)
+
+```
+
+```{r}
+# Multiple imputation for measurement error correction
+m=10
+betas_mi_tte = vcovs_mi_tte = vector("list", m)
+
+for(i in 1:m){
+  
+d10=fread(paste0("/Users/joshslone/Library/CloudStorage/OneDrive-Vanderbilt/KS_MI_datasets/MI_datasets/overall_ppv_npv/ks_mi_",i,".csv"))
+#d10=fread(paste0("/Users/joshslone/Library/CloudStorage/OneDrive-Vanderbilt/KS_MI_datasets/MI_datasets/by_site/ks_mi_",i,".csv"))
+
+#d10=fread(paste0("/Users/joshslone/Library/CloudStorage/OneDrive-Vanderbilt/KS_MI_datasets/MI_datasets/ch/ks_mi_",i,".csv"))
+
+# d_tte = d10 |> lazy_dt() |> group_by(patient) |> filter(any(ks_ind_imp==1)) |> mutate(ks_d_imp=if_else(cumsum(ks_ind_imp)==1 & is.na(canc_d_final),as.Date(paste(year_month, "-01", sep="")),if_else(!is.na(canc_d_final),as.Date(canc_d_final),NA))) |>  filter(as.Date(ks_d_imp) >= as.Date(enrol_d_imp) - 60) |> mutate(censor_d_imp=if_else(row_number()==n() & death_ind_imp !=1,as.Date(paste(year_month, "-01", sep="")) %m+% months(1),NA),death_d_imp=if_else(death_ind_imp==1,as.Date(paste(year_month, "-01", sep="")) %m+% months(1),NA)) |> fill(c(death_d_imp,censor_d_imp),.direction = "downup") |> filter(cumsum(ks_ind_imp)==1) |> mutate(ks_d_imp=if_else(is.na(canc_d_final),as.Date(paste(year_month, "-01", sep="")),as.Date(canc_d_final)), time_imp=if_else(is.na(death_d_imp),as.numeric(as.Date(censor_d_imp)-as.Date(ks_d_imp)+1),as.numeric(as.Date(death_d_imp)-as.Date(ks_d_imp)+1)),canc_yr_imp=as.numeric(format(ks_d_imp,'%Y')), death_ind_imp1=if_else(is.na(death_d_imp),0,1)) |> ungroup() |> as.data.frame()
+
+# d_tte = d10  |> group_by(patient) |> filter(any(ks_ind_imp==1)) |> mutate(ks_d_imp=if_else(cumsum(ks_ind_imp)==1 & is.na(canc_d_final),as.Date(paste(year_month, "-01", sep="")),if_else(!is.na(canc_d_final),as.Date(canc_d_final),NA))) |>  filter(as.Date(ks_d_imp) >= as.Date(enrol_d_imp) - 60) |> mutate(censor_d_imp=if_else(row_number()==n() & death_ind_imp !=1,as.Date(paste(year_month, "-01", sep="")) %m+% months(1),NA),death_d_imp=if_else(death_ind_imp==1,as.Date(paste(year_month, "-01", sep="")) %m+% months(1),NA)) |> fill(c(death_d_imp,censor_d_imp),.direction = "downup") |> filter(cumsum(ks_ind_imp)==1) |> mutate(ks_d_imp=if_else(is.na(canc_d_final),as.Date(paste(year_month, "-01", sep="")),as.Date(canc_d_final)), time_imp=if_else(is.na(death_d_imp),as.numeric(as.Date(censor_d_imp)-as.Date(ks_d_imp)+1),as.numeric(as.Date(death_d_imp)-as.Date(ks_d_imp)+1)),canc_yr_imp=as.numeric(format(ks_d_imp,'%Y')), death_ind_imp1=if_else(is.na(death_d_imp),0,1)) 
+
+### no enrollment imp with ks imp
+# 
+# d_tte = d10  |> group_by(patient) |> filter(any(ks_ind_imp==1)) |> mutate(ks_d_imp=if_else(cumsum(ks_ind_imp)==1 & is.na(canc_d_final),as.Date(paste(year_month, "-01", sep="")),if_else(!is.na(canc_d_final),as.Date(canc_d_final),NA))) |>  filter(as.Date(ks_d_imp) >= as.Date(enrol_d1) - 60) |> mutate(censor_d_imp=if_else(row_number()==n() & death_ind_imp !=1,as.Date(paste(year_month, "-01", sep="")) %m+% months(1),NA),death_d_imp=if_else(death_ind_imp==1,as.Date(paste(year_month, "-01", sep="")) %m+% months(1),NA)) |> fill(c(death_d_imp,censor_d_imp),.direction = "downup") |> filter(cumsum(ks_ind_imp)==1) |> mutate(ks_d_imp=if_else(is.na(canc_d_final),as.Date(paste(year_month, "-01", sep="")),as.Date(canc_d_final)), time_imp=if_else(is.na(death_d_imp),as.numeric(as.Date(censor_d_imp)-as.Date(ks_d_imp)+1),as.numeric(as.Date(death_d_imp)-as.Date(ks_d_imp)+1)),canc_yr_imp=as.numeric(format(ks_d_imp,'%Y')), death_ind_imp1=if_else(is.na(death_d_imp),0,1)) 
+
+d_tte = d10 |> group_by(patient) |> filter(any(ks_ind_imp==1)) |> mutate(ks_d_imp=if_else(cumsum(ks_ind_imp)==1 & is.na(canc_d_final),as.Date(paste(year_month, "-01", sep="")),if_else(!is.na(canc_d_final),as.Date(canc_d_final),NA))) |>  filter(as.Date(ks_d_imp) >= as.Date(enrol_d1) - 60) |> mutate(censor_d_imp=if_else(row_number()==n() & death_ind_imp !=1,as.Date(paste(year_month, "-01", sep="")) %m+% months(1),NA),death_d_imp=if_else(death_ind_imp==1,as.Date(paste(year_month, "-01", sep="")) %m+% months(1),NA)) |> fill(c(death_d_imp,censor_d_imp),.direction = "downup") |> filter(cumsum(ks_ind_imp)==1) |> mutate(ks_d_imp=if_else(is.na(canc_d_final),as.Date(paste(year_month, "-01", sep="")),as.Date(canc_d_final)), time_imp=if_else(is.na(death_d_imp),as.numeric(as.Date(censor_d_imp)-as.Date(ks_d_imp)+1),as.numeric(as.Date(death_d_imp)-as.Date(ks_d_imp)+1)),canc_yr_imp=as.numeric(format(ks_d_imp,'%Y')), death_ind_imp1=if_else(is.na(death_d_imp),0,1))
+
+
+## MI
+
+fit_mi_tte = coxph(Surv(time_imp,death_ind_imp) ~ male_imp+program+I(age_imp/10)+canc_yr_imp+art_ind_imp + cd4_rt_imp, data = d_tte)
+
+betas_mi_tte[[i]] = coef(fit_mi_tte)
+vcovs_mi_tte[[i]] = vcov(fit_mi_tte)
+}
+
+
+#mi_tte_results1=MIcombine(betas_mi_tte,vcovs_mi_tte)
+
+mi_tte_results2=MIcombine(betas_mi_tte,vcovs_mi_tte)
+
+
+mi_tte_results=MIcombine(betas_mi_tte,vcovs_mi_tte)
+
+
+save(wgt_tte_results1,rak_tte_results1,ehr_tte_results1,mi_tte_results1,mi_tte_results2,file="/Users/joshslone/Library/CloudStorage/OneDrive-Vanderbilt/KS_MI_datasets/MI_error_prone_nr_elig.Rda") 
+
+load("/Users/joshslone/Library/CloudStorage/OneDrive-Vanderbilt/KS_MI_datasets/MI_error_prone_nr_elig.Rda") 
+
+
+```
+
+
+
+
+```{r}
+
+### CHECK AND FORMAT RESULTS FROM THE 3 ANALYSES!!!
+
+
+lst= list(wgt_tte_results1,rak_tte_results1,ehr_tte_results1,mi_tte_results2,mi_tte_results1)
+res2=list()
+### FORMATTING RESULTS
+
+for (j in 1:length(lst)){
+  res0 <- lst[[j]]
+  
+  betas <- res0$coefficients
+  
+  cis3<- cbind(betas, betas - 1.96*(sqrt(diag(vcov(res0)))), betas + 1.96*(sqrt(diag(vcov(res0)))))
+  res2[[j]] <- exp(cis3)
+}
+
+
+ktab9 = cbind(HR = format(round(res2[[1]][,1],2),nsmall=2), CI_95_percent = paste0(format(round(res2[[1]][,2],2),nsmall=2)," - ",format(round(res2[[1]][,3],2),nsmall=2)),
+              HR = format(round(res2[[2]][,1],2),nsmall=2), CI_95_percent = paste0(format(round(res2[[2]][,2],2),nsmall=2)," - ",format(round(res2[[2]][,3],2),nsmall=2)),
+              HR = format(round(res2[[3]][,1],2),nsmall=2), CI_95_percent = paste0(format(round(res2[[3]][,2],2),nsmall=2)," - ",format(round(res2[[3]][,3],2),nsmall=2)),HR = format(round(res2[[4]][,1],2),nsmall=2), CI_95_percent = paste0(format(round(res2[[4]][,2],2),nsmall=2)," - ",format(round(res2[[4]][,3],2),nsmall=2)),HR = format(round(res2[[5]][,1],2),nsmall=2), CI_95_percent = paste0(format(round(res2[[5]][,2],2),nsmall=2)," - ",format(round(res2[[5]][,3],2),nsmall=2)))
+
+
+rownames(ktab9)=c('Male sex','East Africa','Age at KS diagnosis x 10 years','Year at KS diagnosis','ART before KS diagnosis','Sq. rt. CD4 at KS diagnosis')
+ktab9 <- kable(ktab9,booktabs=T)
+kable_styling(ktab9,full_width = F, font_size = 10,latex_options="scale_down")%>%add_header_above(c(" ","IPW" = 2,"GR" = 2,"EHR" = 2,"MI KS Overall" = 2,"MI KS by Site" = 2))
+
+```
+
+
+```{r}
+
+tab_tte2 = data.frame(labeltext=c("Male sex","Male sex","Male sex","Male sex","Male sex","East Africa","East Africa","East Africa","East Africa","East Africa","Age at diagnosis x 10 years","Age at diagnosis x 10 years","Age at diagnosis x 10 years","Age at diagnosis x 10 years","Age at diagnosis x 10 years","Year of diagnosis","Year of diagnosis","Year of diagnosis","Year of diagnosis","Year of diagnosis","ART before diagnosis","ART before diagnosis","ART before diagnosis","ART before diagnosis","ART before diagnosis","CD4 (sq. root) at diagnosis","CD4 (sq. root) at diagnosis","CD4 (sq. root) at diagnosis","CD4 (sq. root) at diagnosis","CD4 (sq. root) at diagnosis"),mean=c(res2[[1]][1],res2[[2]][1],res2[[3]][1],res2[[4]][1],res2[[5]][1],res2[[1]][2],res2[[2]][2],res2[[3]][2],res2[[4]][2],res2[[5]][2],res2[[1]][3],res2[[2]][3],res2[[3]][3],res2[[4]][3],res2[[5]][3],res2[[1]][4],res2[[2]][4],res2[[3]][4],res2[[4]][4],res2[[5]][4],res2[[1]][5],res2[[2]][5],res2[[3]][5],res2[[4]][5],res2[[5]][5],res2[[1]][6],res2[[2]][6],res2[[3]][6],res2[[4]][6],res2[[5]][6]), lower=c(res2[[1]][7],res2[[2]][7],res2[[3]][7],res2[[4]][7],res2[[5]][7],res2[[1]][8],res2[[2]][8],res2[[3]][8],res2[[4]][8],res2[[5]][8],res2[[1]][9],res2[[2]][9],res2[[3]][9],res2[[4]][9],res2[[5]][9],res2[[1]][10],res2[[2]][10],res2[[3]][10],res2[[4]][10],res2[[5]][10],res2[[1]][11],res2[[2]][11],res2[[3]][11],res2[[4]][11],res2[[5]][11],res2[[1]][12],res2[[2]][12],res2[[3]][12],res2[[4]][12],res2[[5]][12]),upper=c(res2[[1]][13],res2[[2]][13],res2[[3]][13],res2[[4]][13],res2[[5]][13],res2[[1]][14],res2[[2]][14],res2[[3]][14],res2[[4]][14],res2[[5]][14],res2[[1]][15],res2[[2]][15],res2[[3]][15],res2[[4]][15],res2[[5]][15],res2[[1]][16],res2[[2]][16],res2[[3]][16],res2[[4]][16],res2[[5]][16],res2[[1]][17],res2[[2]][17],res2[[3]][17],res2[[4]][17],res2[[5]][17],res2[[1]][18],res2[[2]][18],res2[[3]][18],res2[[4]][18],res2[[5]][18]),group=c("IPW", "GR", "EHR","MI KS Overall","MI KS by Site","IPW", "GR", "EHR","MI KS Overall","MI KS by Site","IPW", "GR", "EHR","MI KS Overall","MI KS by Site","IPW", "GR", "EHR","MI KS Overall","MI KS by Site","IPW", "GR", "EHR","MI KS Overall","MI KS by Site","IPW", "GR", "EHR","MI KS Overall","MI KS by Site"))
+
+
+
+fpDraw3CI = function (lower_limit, estimate, upper_limit, size, y.offset = 0.5, 
+    clr.line, clr.marker, lwd, lty = 1, vertices, vertices.height = 0.1, 
+    pch = 8, shapes_gp = fpShapesGp(), shape_coordinates = structure(c(1, 
+        1), max.coords = c(1, 1)), ...) 
+{
+    if (is.na(lower_limit) || is.na(estimate) || is.na(upper_limit)) {
+        return()
+    }
+    forestplot:::prFpDrawLine(lower_limit = lower_limit, upper_limit = upper_limit, 
+        line_gp = prGetShapeGp(shapes_gp, shape_coordinates, 
+            "lines", default = forestplot:::prDefaultGp(col = clr.line, lwd = lwd, 
+                lty = lty)), vertices_gp = prGetShapeGp(shapes_gp, 
+            shape_coordinates, "vertices", nodefault = TRUE), 
+        y.offset = y.offset, vertices = vertices, vertices.height = vertices.height)
+    box <- convertX(unit(estimate, "native"), "npc", valueOnly = TRUE)
+    if (box >= 0 && box <= 1) {
+        if (!is.unit(size)) {
+            size <- unit(size, "snpc")
+        }
+        grid.points(x = unit(estimate, "native"), y = unit(y.offset, 
+            "npc"), size = size, pch = pch, gp = prGetShapeGp(shapes_gp, 
+            shape_coordinates, "box", default = gpar(fill = clr.marker, 
+                col = clr.marker)))
+    }
+}
+
+
+fpDraw4CI = function (lower_limit, estimate, upper_limit, size, y.offset = 0.5, 
+    clr.line, clr.marker, lwd, lty = 1, vertices, vertices.height = 0.1, 
+    pch = 24, shapes_gp = fpShapesGp(), shape_coordinates = structure(c(1, 
+        1), max.coords = c(1, 1)), ...) 
+{
+    if (is.na(lower_limit) || is.na(estimate) || is.na(upper_limit)) {
+        return()
+    }
+    forestplot:::prFpDrawLine(lower_limit = lower_limit, upper_limit = upper_limit, 
+        line_gp = prGetShapeGp(shapes_gp, shape_coordinates, 
+            "lines", default = forestplot:::prDefaultGp(col = clr.line, lwd = lwd, 
+                lty = lty)), vertices_gp = prGetShapeGp(shapes_gp, 
+            shape_coordinates, "vertices", nodefault = TRUE), 
+        y.offset = y.offset, vertices = vertices, vertices.height = vertices.height)
+    box <- convertX(unit(estimate, "native"), "npc", valueOnly = TRUE)
+    if (box >= 0 && box <= 1) {
+        if (!is.unit(size)) {
+            size <- unit(size, "snpc")
+        }
+        grid.points(x = unit(estimate, "native"), y = unit(y.offset, 
+            "npc"), size = size, pch = pch, gp = prGetShapeGp(shapes_gp, 
+            shape_coordinates, "box", default = gpar(fill = clr.marker, 
+                col = clr.marker)))
+    }
+}
+
+ library(forestplot)
+ tab_tte2 |>  group_by(group) |>
+  forestplot::forestplot(fn.ci_norm=c(fpDrawNormalCI, fpDrawDiamondCI, fpDraw3CI, fpDrawCircleCI,fpDraw4CI), xlab = "HR Estimates with 95% CI", boxsize=0.09, xlog=TRUE, xticks =  c(log(.125),log(0.25),log(0.5),0,log(2),log(4),log(8)),txt_gp = fpTxtGp(label=gpar(cex=.8),xlab=gpar(cex=.7), ticks=gpar(cex=.7), legend=gpar(cex=.7))) |> 
+  fp_add_lines("steelblue") |> 
+  fp_add_header("Variable") |> 
+  fp_set_style(box = c("blue", "red","darkgreen","purple","orange"))  |>  fp_set_zebra_style("#F5F9F9") 
+ 
+ 
+ 
+```
+
+
+
+
+```{r}
+
+
+vars=c("Program, East Africa", "Sex, male", "Year of KS diagnosis", "ART at KS diagnosis", "Age at KS diagnosis","CD4 count at KS diagnosis")
+
+p1=c(paste(round(table(d7$program)[[2]]/sum(table(d7$program)),3)*100, '%', sep = ""),paste(round(table(d7$male)[[2]]/sum(table(d7$male)),3)*100, '%', sep = ""),paste0(quantile(d7$canc_yr)[[3]]," ","(",quantile(d7$canc_yr)[[2]],", ", quantile(d7$canc_yr)[[4]],")"), paste(round(table(d7$art_ind)[[2]]/sum(table(d7$art_ind)),3)*100, '%', sep = ""),paste0(round(quantile(d7$age)[[3]],1)," ","(",round(quantile(d7$age)[[2]],1),", ", round(quantile(d7$age)[[4]],1),")"),paste0(round(quantile(d7$cd4_rt_init_imp)[[3]]^2,1)," ","(",round(quantile(d7$cd4_rt_init_imp)[[2]]^2,1),", ", round(quantile(d7$cd4_rt_init_imp)[[4]]^2,1),")"))
+
+v3=data.frame(vars,p1)
+
+ktab<-kable(v3,caption = "Characteristics of error-prone KS mortality cohort",booktabs=TRUE,col.names = c("Variable","KS cases (N=2,290)"),linesep = "\\addlinespace")
+
+kable_styling(ktab,full_width = F, font_size = 10,latex_options = "scale_down") |> add_footnote("Binary variables include percentages. Numeric variables include medians (25th and 75th percentiles).")
+
+
+```
+
+
+
+```{r}
+
+d_prev11=d_tte_cw[d_tte_cw$V==1,]
+
+vars=c("Program, East Africa", "Sex, male", "Year of KS diagnosis", "ART at KS diagnosis", "Age at KS diagnosis","CD4 count at KS diagnosis")
+
+p1=c(paste(round(weighted.mean(d_prev11$program,d_prev11$w_est),3)*100, '%', sep = ""),paste(round(weighted.mean(d_prev11$male_final,d_prev11$w_est),3)*100, '%', sep = ""),paste0(round(modi::weighted.quantile(d_prev11$canc_yr_final,d_prev11$w_est,prob=0.5),1)," ","(",round(modi::weighted.quantile(d_prev11$canc_yr_final,d_prev11$w_est,prob=0.25),1),", ", round(modi::weighted.quantile(d_prev11$canc_yr_final,d_prev11$w_est,prob=0.75),1),")"),paste(round(weighted.mean(d_prev11$art_ind_final,d_prev11$w_est)
+,3)*100, '%', sep = ""),paste0(round(modi::weighted.quantile(d_prev11$age_final,d_prev11$w_est,prob=0.5),1)," ","(",round(modi::weighted.quantile(d_prev11$age_final,d_prev11$w_est,prob=0.25),1),", ", round(modi::weighted.quantile(d_prev11$age_final,d_prev11$w_est,prob=0.75),1),")"),paste0(round(modi::weighted.quantile(d_prev11$cd4_rt_imp_final,d_prev11$w_est,prob=0.5)^2,1)," ","(",round(modi::weighted.quantile(d_prev11$cd4_rt_imp_final,d_prev11$w_est,prob=0.25)^2,1),", ", round(modi::weighted.quantile(d_prev11$cd4_rt_imp_final,d_prev11$w_est,prob=0.75)^2,1),")"))
+
+v2=data.frame(vars,p1)
+
+ktab<-kable(v2,caption = "Characteristics of weighted KS mortality cohort",booktabs=TRUE,col.names = c("Variable","KS cases (N=304)"),linesep = "\\addlinespace")
+
+kable_styling(ktab,full_width = F, font_size = 10,latex_options = "scale_down") |> add_footnote("Binary variables include percentages. Numeric variables include medians (25th and 75th percentiles).")
+
+
+
+```
+
+
+```{r}
+
+### weighted K-M curve using IPW
+library(gridExtra)
+
+library(survMisc)
+
+d_tte_cw$time_final1=d_tte_cw$time_final/365.25
+s11=survfit(Surv(time_final1,death_ind_final)~1,subset = V==1, type="kaplan-meier", data=d_tte_cw, weights = w_est)
+s1= s11%>% ggplot2::autoplot(conf.int=T,surv.linetype = 'dashed',censor=FALSE,xlab="Time (years)", ylab="Survival Probability", main="Overall survival from KS Diagnosis")
+
+s12=data.frame(s11$time,s11$surv,s11$lower, s11$upper)
+
+
+d_tte_cw_1=d_tte_cw |> mutate(program1=factor(program,labels=c("CCASAnet", "IeDEA-EA")))
+
+s2=survfit(Surv(time_final1,death_ind_final)~program1,subset = V==1, type="kaplan-meier", data=d_tte_cw_1, weights = w_est) %>% ggplot2::autoplot(conf.int=T,surv.linetype = 'dashed',censor=FALSE,xlab="Time (years)", ylab="Survival Probability", main="Survival from KS Diagnosis by Region") + labs(color = "Region", fill = "Region")  
+
+grid.arrange(s1, s2, nrow=2)
+
+```
+
+
+```{r}
+
+### weighted LTFU
+library(data.table)
+library(dplyr)
+library(stringr)
+
+dcc1 = d_tte_cw |> filter(V==1) |> mutate(center=word(strata,1))
+
+d_c=fread("/Users/joshslone/Desktop/PhD/Research/KS_Data/Code/dat_base_mi.csv") 
+  
+d_c = d_c |> mutate(center=word(strata,1))
+#patient with multiple centers, chose the most recent visit date as their center (reduces calculated LTFU rate)
+
+# 95% closure for each center to determine LTFU
+l_dates <- d_c %>% group_by(center) %>% 
+  summarise(ltfu_date=quantile(stop_d, probs = 0.95, type = 1)) 
+
+# determine which patients were lost to follow by having their last visit prior to one year before the 95% date for that center 
+
+v_ltfu <- dcc1 %>% left_join(l_dates) %>% mutate(LTFU=if_else(as.Date(ltfu_date)-as.Date(l_alive_d_final)>365 & death_y_final==0,1,0))
+
+ltfu_summary<-v_ltfu%>%group_by(program)%>%summarise(n=n(),LTFU=sum(LTFU),LTFU_Percent=round(100*sum(LTFU)/n(),2))
+
+### weighted death KS cohort sum(v_ltfu[v_ltfu$death_y_final==1,]$w_est)/sum(v_ltfu$w_est)
+
+
+### weighted death EA sum(v_ltfu[v_ltfu$death_y_final==1 & v_ltfu$program==1,]$w_est)/sum(v_ltfu[v_ltfu$program==1,]$w_est)
+
+### weighted death LA sum(v_ltfu[v_ltfu$death_y_final==1 & v_ltfu$program==0,]$w_est)/sum(v_ltfu[v_ltfu$program==0,]$w_est)
+
+# sum(v_ltfu[v_ltfu$LTFU==1,]$w_est)
+# sum(v_ltfu[v_ltfu$program==0 & v_ltfu$LTFU==1,]$w_est)/sum(v_ltfu[v_ltfu$program==0,]$w_est)
+# sum(v_ltfu[v_ltfu$program==1 & v_ltfu$LTFU==1,]$w_est)/sum(v_ltfu[v_ltfu$program==1,]$w_est)
+# sum(v_ltfu[v_ltfu$LTFU==1,]$w_est)/sum(v_ltfu$w_est)
+```
